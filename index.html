@@ -6,11 +6,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+    }
+  </script>
   <!-- React + ReactDOM CDN -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-gradient-to-b from-yellow-50 to-white min-h-screen">
   <div id="root"></div>
@@ -20,14 +27,18 @@
 
     function BananoDashboard() {
       const [account, setAccount] = useState("");
-      const [rpcUrl, setRpcUrl] = useState("https://api.banano.trade/proxy");
-      const [balanceRaw, setBalanceRaw] = useState(null);
+      const rpcUrl = "https://api.banano.trade/proxy"; // Hardcoded and hidden
       const [balanceBan, setBalanceBan] = useState("0");
       const [pendingBan, setPendingBan] = useState("0");
       const [priceUsd, setPriceUsd] = useState(null);
+      const [priceHistory, setPriceHistory] = useState({});
+      const [selectedPeriod, setSelectedPeriod] = useState(1);
+      const periods = [1, 7, 30, 90, 365];
       const [loading, setLoading] = useState(false);
       const [err, setErr] = useState(null);
       const [history, setHistory] = useState([]);
+      const [darkMode, setDarkMode] = useState(false);
+      const donationAddress = "ban_184q6ah1cnumorsxedazfukmd1xcx4he5fnmjri5cm7mhen4oixo9gtqwhk1";
 
       function rawToBan(rawStr) {
         try {
@@ -56,16 +67,56 @@
         }
       }
 
+      async function fetchPriceHistory(days) {
+        try {
+          const res = await fetch(`https://api.coingecko.com/api/v3/coins/banano/market_chart?vs_currency=usd&days=${days}`);
+          const j = await res.json();
+          if (j && j.prices) {
+            setPriceHistory(prev => ({ ...prev, [days]: j.prices }));
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
       useEffect(() => {
         fetchPrice();
         const t = setInterval(fetchPrice, 60_000);
+        periods.forEach(days => fetchPriceHistory(days));
         return () => clearInterval(t);
       }, []);
+
+      useEffect(() => {
+        const chartCtx = document.getElementById('priceChart');
+        if (chartCtx && priceHistory[selectedPeriod]) {
+          const labels = priceHistory[selectedPeriod].map(([time]) => new Date(time).toLocaleDateString());
+          const data = priceHistory[selectedPeriod].map(([, price]) => price);
+          new Chart(chartCtx, {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [{
+                label: `Banano Price (USD) over ${selectedPeriod} days`,
+                data,
+                borderColor: 'rgb(255, 193, 7)',
+                tension: 0.1
+              }]
+            },
+            options: {
+              scales: {
+                y: {
+                  beginAtZero: false
+                }
+              }
+            }
+          });
+        }
+      }, [selectedPeriod, priceHistory]);
 
       async function fetchBalance() {
         setErr(null);
         if (!account) {
-          setErr("Nhập account đã nè");
+          setErr("Please enter an account");
           return;
         }
         setLoading(true);
@@ -77,10 +128,9 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
-          if (!res.ok) throw new Error(`RPC lỗi ${res.status}`);
+          if (!res.ok) throw new Error(`RPC error ${res.status}`);
           const j = await res.json();
-          if (typeof j.balance === "undefined") throw new Error("RPC trả về không đúng");
-          setBalanceRaw(j.balance);
+          if (typeof j.balance === "undefined") throw new Error("Invalid RPC response");
           setBalanceBan(rawToBan(j.balance));
           setPendingBan(rawToBan(j.pending || "0"));
 
@@ -103,27 +153,37 @@
         }
       }
 
-      return (
-        <div className="max-w-4xl mx-auto bg-white/80 backdrop-blur rounded-2xl shadow-lg p-6 mt-10">
-          <h1 className="text-3xl font-extrabold">Banano Dashboard 🍌</h1>
-          <p className="text-sm text-gray-600 mt-1">Nhập account Banano để xem balance, giá, và lịch sử giao dịch</p>
+      function toggleDarkMode() {
+        setDarkMode(!darkMode);
+        document.documentElement.classList.toggle('dark');
+      }
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+      function copyDonationAddress() {
+        navigator.clipboard.writeText(donationAddress);
+        alert('Address copied to clipboard!');
+      }
+
+      return (
+        <div className={`max-w-4xl mx-auto bg-white/80 backdrop-blur rounded-2xl shadow-lg p-6 mt-10 ${darkMode ? 'dark:bg-gray-800 dark:text-white' : ''}`}>
+          <div className="flex justify-between items-center">
+            <h1 className="text-3xl font-extrabold">Banano Dashboard 🍌</h1>
+            <button onClick={toggleDarkMode} className="bg-gray-200 dark:bg-gray-700 px-3 py-1 rounded">
+              {darkMode ? 'Light Mode' : 'Dark Mode'}
+            </button>
+          </div>
+          <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">Enter your Banano account to view balance, price, and transaction history</p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
             <div>
-              <label className="block text-xs font-medium text-gray-700">RPC Endpoint</label>
-              <input value={rpcUrl} onChange={(e) => setRpcUrl(e.target.value)}
-                className="mt-1 block w-full rounded-md border p-2" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-700">Account</label>
+              <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">Account</label>
               <input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="ban_..."
-                className="mt-1 block w-full rounded-md border p-2" />
+                className="mt-1 block w-full rounded-md border p-2 dark:bg-gray-700 dark:text-white" />
             </div>
             <div className="flex items-end">
               <button onClick={fetchBalance}
                 className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-bold py-2 px-4 rounded-lg"
                 disabled={loading}>
-                {loading ? "Đang lấy..." : "Lấy dữ liệu"}
+                {loading ? "Loading..." : "Fetch Data"}
               </button>
             </div>
           </div>
@@ -131,27 +191,23 @@
           {err && <div className="mt-4 text-red-600">Error: {err}</div>}
 
           <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="p-4 bg-white rounded-lg border">
-              <div className="text-xs text-gray-500">Balance (raw)</div>
-              <div className="text-xl font-mono mt-2">{balanceRaw ?? "-"}</div>
-            </div>
-            <div className="p-4 bg-white rounded-lg border">
-              <div className="text-xs text-gray-500">Balance (BAN)</div>
+            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Balance (BAN)</div>
               <div className="text-2xl font-bold mt-2">{balanceBan}</div>
             </div>
-            <div className="p-4 bg-white rounded-lg border">
-              <div className="text-xs text-gray-500">Pending (BAN)</div>
+            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Pending (BAN)</div>
               <div className="text-xl font-mono mt-2">{pendingBan}</div>
+            </div>
+            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Banano price (USD)</div>
+              <div className="text-2xl mt-2">{priceUsd ? `$${priceUsd}` : "-"}</div>
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="p-4 bg-white rounded-lg border">
-              <div className="text-xs text-gray-500">Banano price (USD)</div>
-              <div className="text-2xl mt-2">{priceUsd ? `$${priceUsd}` : "-"}</div>
-            </div>
-            <div className="p-4 bg-white rounded-lg border">
-              <div className="text-xs text-gray-500">Estimated Value (USD)</div>
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-1 gap-4">
+            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Estimated Value (USD)</div>
               <div className="text-2xl mt-2">
                 {priceUsd && balanceBan !== "0" ? (`$${(parseFloat(balanceBan) * priceUsd).toFixed(6)}`) : "-"}
               </div>
@@ -159,17 +215,40 @@
           </div>
 
           <div className="mt-8">
-            <h2 className="text-xl font-bold mb-2">📜 Lịch sử giao dịch</h2>
-            {history.length === 0 && <div className="text-gray-500">Không có giao dịch</div>}
+            <h2 className="text-xl font-bold mb-2">📈 Price Chart</h2>
+            <div className="flex space-x-2 mb-4">
+              {periods.map(days => (
+                <button key={days} onClick={() => setSelectedPeriod(days)}
+                  className={`px-3 py-1 rounded ${selectedPeriod === days ? 'bg-yellow-400 text-black' : 'bg-gray-200 dark:bg-gray-600'}`}>
+                  {days} days
+                </button>
+              ))}
+            </div>
+            <canvas id="priceChart" className="w-full h-64"></canvas>
+          </div>
+
+          <div className="mt-8">
+            <h2 className="text-xl font-bold mb-2">📜 Transaction History</h2>
+            {history.length === 0 && <div className="text-gray-500 dark:text-gray-400">No transactions</div>}
             <ul className="space-y-2">
               {history.map((tx, i) => (
-                <li key={i} className="p-3 bg-white rounded-lg border flex flex-col">
-                  <span className="text-sm text-gray-600">{tx.type.toUpperCase()}</span>
+                <li key={i} className="p-3 bg-white rounded-lg border dark:bg-gray-700 flex flex-col">
+                  <span className="text-sm text-gray-600 dark:text-gray-300">{tx.type.toUpperCase()}</span>
                   <span className="font-mono text-yellow-600">{rawToBan(tx.amount)} BAN</span>
-                  <span className="text-xs text-gray-500 break-all">Hash: {tx.hash}</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400 break-all">Hash: {tx.hash}</span>
                 </li>
               ))}
             </ul>
+          </div>
+
+          <div className="mt-8 p-4 bg-white rounded-lg border dark:bg-gray-700">
+            <p className="text-sm text-gray-600 dark:text-gray-300">
+              If you like this dashboard, please consider donating to: 
+              <span className="font-mono ml-1">{donationAddress}</span>
+              <button onClick={copyDonationAddress} className="ml-2 bg-blue-500 text-white px-2 py-1 rounded text-xs">
+                Copy
+              </button>
+            </p>
           </div>
         </div>
       );
