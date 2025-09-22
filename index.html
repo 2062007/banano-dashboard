@@ -4,41 +4,57 @@
   <meta charset="UTF-8" />
   <title>Banano Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = { darkMode: 'class' }
   </script>
-  <!-- React + ReactDOM CDN -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <!-- Chart.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body class="bg-gradient-to-b from-gray-900 to-gray-800 min-h-screen text-gray-100">
+<body class="bg-gradient-to-b from-yellow-50 to-white dark:from-gray-900 dark:to-gray-800 min-h-screen">
   <div id="root"></div>
-
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
     function BananoDashboard() {
+      const [accounts, setAccounts] = useState([]);
+      const [newAccount, setNewAccount] = useState("");
       const rpcUrl = "https://api.banano.trade/proxy";
-      const [accounts, setAccounts] = useState("");
       const [balances, setBalances] = useState({});
+      const [pending, setPending] = useState({});
       const [priceUsd, setPriceUsd] = useState(null);
       const [priceHistory, setPriceHistory] = useState({});
-      const [selectedPeriod, setSelectedPeriod] = useState(7);
-      const [chartLoading, setChartLoading] = useState(false);
+      const [selectedPeriod, setSelectedPeriod] = useState(1);
+      const [loading, setLoading] = useState(false);
       const [err, setErr] = useState(null);
       const [darkMode, setDarkMode] = useState(true);
       const donationAddress = "ban_184q6ah1cnumorsxedazfukmd1xcx4he5fnmjri5cm7mhen4oixo9gtqwhk1";
       const chartRef = useRef(null);
       const chartCanvasRef = useRef(null);
-      const periods = [1, 7, 30, 90, 365];
 
-      // convert raw -> BAN
+      // === Dark mode persist ===
+      useEffect(() => {
+        const saved = localStorage.getItem("darkMode");
+        if (saved !== null) {
+          setDarkMode(saved === "true");
+          if (saved === "true") document.documentElement.classList.add("dark");
+        } else {
+          document.documentElement.classList.add("dark");
+        }
+      }, []);
+
+      function toggleDarkMode() {
+        setDarkMode(prev => {
+          const newMode = !prev;
+          localStorage.setItem("darkMode", newMode);
+          if (newMode) document.documentElement.classList.add("dark");
+          else document.documentElement.classList.remove("dark");
+          return newMode;
+        });
+      }
+
       function rawToBan(rawStr) {
         try {
           const raw = BigInt(rawStr || "0");
@@ -48,171 +64,91 @@
           const remStr = rem.toString().padStart(29, "0");
           let frac = remStr.replace(/0+$/g, "");
           if (frac === "") return whole.toString();
-          return `${whole.toString()}.${frac}`;
+          return `${whole}.${frac}`;
         } catch {
           return "0";
         }
       }
 
-      // price
       async function fetchPrice() {
         try {
           const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=banano&vs_currencies=usd");
-          if (!res.ok) throw new Error("Price API error");
           const j = await res.json();
-          setPriceUsd(j.banano?.usd ?? null);
-        } catch (e) {
-          console.error(e);
-          setErr("Failed to fetch price");
-        }
+          setPriceUsd(j.banano.usd);
+        } catch (e) { setErr("Failed to fetch price"); }
       }
 
-      async function fetchPriceHistory(days) {
-        setChartLoading(true);
+      async function fetchBalance(acc) {
         try {
-          const res = await fetch(`https://api.coingecko.com/api/v3/coins/banano/market_chart?vs_currency=usd&days=${days}`);
-          if (!res.ok) throw new Error("Price history API error");
+          const body = { action: "account_balance", account: acc };
+          const res = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
           const j = await res.json();
-          setPriceHistory(prev => ({ ...prev, [days]: j.prices }));
+          setBalances(prev => ({ ...prev, [acc]: rawToBan(j.balance) }));
+          setPending(prev => ({ ...prev, [acc]: rawToBan(j.pending || "0") }));
         } catch (e) {
-          console.error(e);
-          setErr("Failed to fetch chart");
-        } finally {
-          setChartLoading(false);
+          console.error("Balance fetch fail:", e);
         }
       }
 
-      // balances
-      async function fetchBalances() {
-        setErr(null);
-        const lines = accounts.split("\n").map(a => a.trim()).filter(a => a.startsWith("ban_"));
-        const newBalances = {};
-        for (let acc of lines) {
-          try {
-            const body = { action: "account_balance", account: acc };
-            const res = await fetch(rpcUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            });
-            const j = await res.json();
-            newBalances[acc] = {
-              balance: rawToBan(j.balance || "0"),
-              pending: rawToBan(j.pending || "0")
-            };
-          } catch (e) {
-            newBalances[acc] = { balance: "0", pending: "0" };
-          }
+      function addAccount() {
+        const acc = newAccount.trim();
+        if (acc.startsWith("ban_") && !accounts.includes(acc)) {
+          setAccounts([...accounts, acc]);
+          setNewAccount("");
+          fetchBalance(acc);
         }
-        setBalances(newBalances);
-      }
-
-      // chart effect
-      useEffect(() => {
-        if (!priceHistory[selectedPeriod]) fetchPriceHistory(selectedPeriod);
-      }, [selectedPeriod]);
-
-      useEffect(() => {
-        if (chartCanvasRef.current && priceHistory[selectedPeriod]) {
-          const ctx = chartCanvasRef.current.getContext("2d");
-          if (chartRef.current) chartRef.current.destroy();
-          const labels = priceHistory[selectedPeriod].map(([t]) => new Date(t).toLocaleDateString());
-          const data = priceHistory[selectedPeriod].map(([, p]) => p);
-          const borderColor = darkMode ? "rgb(255,255,255)" : "rgb(255,193,7)";
-          const textColor = darkMode ? "white" : "black";
-          chartRef.current = new Chart(ctx, {
-            type: "line",
-            data: { labels, datasets: [{ data, label: "Banano USD", borderColor }] },
-            options: {
-              scales: {
-                y: { ticks: { color: textColor } },
-                x: { ticks: { color: textColor } }
-              },
-              plugins: { legend: { labels: { color: textColor } } }
-            }
-          });
-        }
-      }, [selectedPeriod, priceHistory, darkMode]);
-
-      // dark mode effect
-      useEffect(() => {
-        const saved = localStorage.getItem("darkMode");
-        if (saved === "false") {
-          setDarkMode(false);
-          document.documentElement.classList.remove("dark");
-        } else {
-          setDarkMode(true);
-          document.documentElement.classList.add("dark");
-        }
-        fetchPrice();
-      }, []);
-
-      function toggleDarkMode() {
-        setDarkMode(prev => {
-          const newVal = !prev;
-          localStorage.setItem("darkMode", newVal);
-          document.documentElement.classList.toggle("dark", newVal);
-          return newVal;
-        });
       }
 
       function copyDonationAddress() {
-        navigator.clipboard.writeText(donationAddress).then(() => alert("Copied!"));
+        navigator.clipboard.writeText(donationAddress).then(() => {
+          alert("Address copied!");
+        });
       }
 
+      useEffect(() => {
+        fetchPrice();
+      }, []);
+
       return (
-        <div className="max-w-5xl mx-auto p-6">
-          <div className="flex justify-between items-center mb-6">
-            <h1 className="text-3xl font-extrabold text-yellow-400">🍌 Banano Dashboard</h1>
-            <button onClick={toggleDarkMode} className="bg-gray-700 px-3 py-1 rounded">
+        <div className="max-w-4xl mx-auto bg-white/80 dark:bg-gray-800/80 rounded-2xl shadow-lg p-6 mt-10">
+          <div className="flex justify-between items-center">
+            <h1 className="text-3xl font-extrabold">Banano Dashboard</h1>
+            <button onClick={toggleDarkMode} className="bg-gray-200 dark:bg-gray-700 px-3 py-1 rounded text-black dark:text-white">
               {darkMode ? "Light Mode" : "Dark Mode"}
             </button>
           </div>
 
-          <textarea value={accounts} onChange={e=>setAccounts(e.target.value)} rows="3"
-            placeholder="Enter one Banano account per line" 
-            className="w-full p-3 rounded bg-gray-800 text-white border border-gray-600"></textarea>
-          <button onClick={fetchBalances} className="mt-3 bg-yellow-400 hover:bg-yellow-500 text-black font-bold px-4 py-2 rounded">
-            Fetch Balances
-          </button>
-
-          {err && <div className="mt-4 text-red-400">{err}</div>}
-
-          <div className="mt-6 grid gap-4 md:grid-cols-2">
-            {Object.entries(balances).map(([acc, {balance, pending}]) => (
-              <div key={acc} className="p-4 bg-gray-800 rounded border border-gray-600">
-                <div className="font-mono break-all text-sm text-yellow-300">{acc}</div>
-                <div className="mt-2 text-xl">Balance: {balance} BAN</div>
-                <div className="text-sm text-gray-400">Pending: {pending} BAN</div>
-                {priceUsd && (
-                  <div className="mt-1 text-green-400">
-                    ≈ ${(parseFloat(balance||"0") * priceUsd).toFixed(6)} USD
-                  </div>
-                )}
-              </div>
-            ))}
+          <div className="mt-6 flex gap-2">
+            <input value={newAccount} onChange={e => setNewAccount(e.target.value)} placeholder="ban_..."
+              className="flex-1 rounded-md border p-2 dark:bg-gray-700 dark:text-white" />
+            <button onClick={addAccount} className="bg-yellow-400 hover:bg-yellow-500 px-4 rounded">Add</button>
           </div>
 
-          <div className="mt-8">
-            <h2 className="text-xl font-bold mb-2">📈 Price Chart</h2>
-            <div className="flex space-x-2 mb-4">
-              {periods.map(days => (
-                <button key={days} onClick={()=>setSelectedPeriod(days)}
-                  className={`px-3 py-1 rounded ${selectedPeriod===days ? "bg-yellow-400 text-black" : "bg-gray-700"}`}>
-                  {days}d
-                </button>
+          {accounts.length === 0 ? (
+            <p className="mt-4 text-gray-500 dark:text-gray-400">No accounts added yet.</p>
+          ) : (
+            <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+              {accounts.map(acc => (
+                <div key={acc} className="p-4 bg-white dark:bg-gray-700 rounded-lg shadow">
+                  <p className="text-xs text-gray-500 break-all">{acc}</p>
+                  <p className="mt-2">Balance: <span className="font-bold">{balances[acc] || "?"} BAN</span></p>
+                  <p>Pending: <span className="font-mono">{pending[acc] || "?"} BAN</span></p>
+                  <button onClick={() => fetchBalance(acc)} className="mt-2 bg-yellow-400 hover:bg-yellow-500 px-2 py-1 rounded">Refresh</button>
+                  {priceUsd && balances[acc] && (
+                    <p className="mt-2">≈ ${(parseFloat(balances[acc]) * priceUsd).toFixed(6)} USD</p>
+                  )}
+                </div>
               ))}
             </div>
-            {chartLoading ? <div>Loading...</div> : <canvas ref={chartCanvasRef} className="w-full h-64"></canvas>}
-          </div>
+          )}
 
-          <div className="mt-8 p-4 bg-gray-800 rounded border border-gray-600">
-            <h2 className="text-lg font-bold text-yellow-400 mb-2">💛 Support this Dashboard</h2>
-            <p className="text-sm">
-              Donate to: <span className="font-mono break-all">{donationAddress}</span>
+          <div className="mt-8 p-4 bg-yellow-100 dark:bg-gray-600 rounded-lg">
+            <h2 className="text-lg font-bold text-yellow-700 dark:text-yellow-300 mb-2">💛 Support</h2>
+            <p className="text-sm">Donate BAN to:
+              <span className="font-mono ml-1 break-all">{donationAddress}</span>
             </p>
-            <button onClick={copyDonationAddress} className="mt-2 bg-yellow-400 hover:bg-yellow-500 text-black px-3 py-1 rounded">
-              Copy Address
+            <button onClick={copyDonationAddress} className="mt-2 bg-yellow-400 hover:bg-yellow-500 text-black font-semibold px-3 py-1 rounded">
+              Copy
             </button>
           </div>
         </div>
