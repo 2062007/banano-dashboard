@@ -4,67 +4,77 @@
   <meta charset="UTF-8" />
   <title>Banano Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    tailwind.config = { darkMode: 'class' }
+    tailwind.config = {
+      darkMode: 'class',
+    }
   </script>
+  <!-- React + ReactDOM CDN -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Chart.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-gradient-to-b from-yellow-50 to-white dark:from-gray-900 dark:to-gray-800 min-h-screen">
   <div id="root"></div>
+
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
     function BananoDashboard() {
-      const [accounts, setAccounts] = useState([]);
-      const [newAccount, setNewAccount] = useState("");
-      const rpcUrl = "https://api.banano.trade/proxy";
-      const [balances, setBalances] = useState({});
-      const [pending, setPending] = useState({});
+      const [accountsInput, setAccountsInput] = useState("");
+      const rpcUrl = "https://api.banano.trade/proxy"; // Hardcoded and hidden
+      const [accountsData, setAccountsData] = useState([]);
       const [priceUsd, setPriceUsd] = useState(null);
       const [priceHistory, setPriceHistory] = useState({});
       const [selectedPeriod, setSelectedPeriod] = useState(1);
+      const periods = [1, 7, 30, 90, 365];
       const [loading, setLoading] = useState(false);
+      const [chartLoading, setChartLoading] = useState(false);
       const [err, setErr] = useState(null);
-      const [darkMode, setDarkMode] = useState(true);
+      const [darkMode, setDarkMode] = useState(false);
+      const [expandedHistories, setExpandedHistories] = useState({});
       const donationAddress = "ban_184q6ah1cnumorsxedazfukmd1xcx4he5fnmjri5cm7mhen4oixo9gtqwhk1";
       const chartRef = useRef(null);
       const chartCanvasRef = useRef(null);
 
-      // === Dark mode persist ===
+      // Load settings from localStorage on mount
       useEffect(() => {
-        const saved = localStorage.getItem("darkMode");
-        if (saved !== null) {
-          setDarkMode(saved === "true");
-          if (saved === "true") document.documentElement.classList.add("dark");
-        } else {
-          document.documentElement.classList.add("dark");
+        const savedAccounts = localStorage.getItem('bananoAccounts');
+        if (savedAccounts) {
+          setAccountsInput(savedAccounts);
+        }
+        const savedDarkMode = localStorage.getItem('bananoDarkMode') === 'true';
+        setDarkMode(savedDarkMode);
+        if (savedDarkMode) {
+          document.documentElement.classList.add('dark');
         }
       }, []);
 
-      function toggleDarkMode() {
-        setDarkMode(prev => {
-          const newMode = !prev;
-          localStorage.setItem("darkMode", newMode);
-          if (newMode) document.documentElement.classList.add("dark");
-          else document.documentElement.classList.remove("dark");
-          return newMode;
-        });
-      }
+      // Save accountsInput to localStorage when it changes
+      useEffect(() => {
+        localStorage.setItem('bananoAccounts', accountsInput);
+      }, [accountsInput]);
+
+      // Save darkMode to localStorage when it changes
+      useEffect(() => {
+        localStorage.setItem('bananoDarkMode', darkMode);
+      }, [darkMode]);
 
       function rawToBan(rawStr) {
         try {
           const raw = BigInt(rawStr || "0");
-          const base = BigInt("100000000000000000000000000000");
+          const base = BigInt("100000000000000000000000000000"); // 1e29
           const whole = raw / base;
           const rem = raw % base;
           const remStr = rem.toString().padStart(29, "0");
           let frac = remStr.replace(/0+$/g, "");
           if (frac === "") return whole.toString();
-          return `${whole}.${frac}`;
+          return `${whole.toString()}.${frac}`;
         } catch {
           return "0";
         }
@@ -73,83 +83,313 @@
       async function fetchPrice() {
         try {
           const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=banano&vs_currencies=usd");
+          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
           const j = await res.json();
-          setPriceUsd(j.banano.usd);
-        } catch (e) { setErr("Failed to fetch price"); }
-      }
-
-      async function fetchBalance(acc) {
-        try {
-          const body = { action: "account_balance", account: acc };
-          const res = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-          const j = await res.json();
-          setBalances(prev => ({ ...prev, [acc]: rawToBan(j.balance) }));
-          setPending(prev => ({ ...prev, [acc]: rawToBan(j.pending || "0") }));
+          if (j && j.banano && typeof j.banano.usd !== "undefined") {
+            setPriceUsd(j.banano.usd);
+          } else {
+            throw new Error("Invalid price data");
+          }
         } catch (e) {
-          console.error("Balance fetch fail:", e);
+          console.error("Failed to fetch price:", e);
+          setErr("Failed to fetch current price. Please try again later.");
         }
       }
 
-      function addAccount() {
-        const acc = newAccount.trim();
-        if (acc.startsWith("ban_") && !accounts.includes(acc)) {
-          setAccounts([...accounts, acc]);
-          setNewAccount("");
-          fetchBalance(acc);
+      async function fetchPriceHistory(days) {
+        setChartLoading(true);
+        try {
+          const res = await fetch(`https://api.coingecko.com/api/v3/coins/banano/market_chart?vs_currency=usd&days=${days}`);
+          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+          const j = await res.json();
+          if (j && j.prices) {
+            setPriceHistory(prev => ({ ...prev, [days]: j.prices }));
+          } else {
+            throw new Error("Invalid price history data");
+          }
+        } catch (e) {
+          console.error(`Failed to fetch price history for ${days} days:`, e);
+          setErr(`Failed to load price chart for ${days} days. Please try again.`);
+        } finally {
+          setChartLoading(false);
         }
-      }
-
-      function copyDonationAddress() {
-        navigator.clipboard.writeText(donationAddress).then(() => {
-          alert("Address copied!");
-        });
       }
 
       useEffect(() => {
         fetchPrice();
+        const t = setInterval(fetchPrice, 60000);
+        return () => clearInterval(t);
       }, []);
 
+      useEffect(() => {
+        if (!priceHistory[selectedPeriod]) {
+          fetchPriceHistory(selectedPeriod);
+        }
+      }, [selectedPeriod]);
+
+      useEffect(() => {
+        if (chartCanvasRef.current && priceHistory[selectedPeriod] && !chartLoading) {
+          const ctx = chartCanvasRef.current.getContext('2d');
+          if (chartRef.current) {
+            chartRef.current.destroy();
+          }
+          const labels = priceHistory[selectedPeriod].map(([time]) => new Date(time).toLocaleDateString());
+          const data = priceHistory[selectedPeriod].map(([, price]) => price);
+          const borderColor = darkMode ? 'rgb(255, 255, 255)' : 'rgb(255, 193, 7)';
+          const backgroundColor = darkMode ? 'rgb(255, 255, 255)' : 'rgb(255, 193, 7)';
+          const textColor = darkMode ? 'white' : 'black';
+          chartRef.current = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [{
+                label: `Banano Price (USD) over ${selectedPeriod} days`,
+                data,
+                borderColor,
+                backgroundColor,
+                tension: 0.1
+              }]
+            },
+            options: {
+              scales: {
+                y: {
+                  beginAtZero: false,
+                  ticks: {
+                    color: textColor
+                  },
+                  grid: {
+                    color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
+                  }
+                },
+                x: {
+                  ticks: {
+                    color: textColor
+                  },
+                  grid: {
+                    color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
+                  }
+                }
+              },
+              plugins: {
+                legend: {
+                  labels: {
+                    color: textColor
+                  }
+                }
+              }
+            }
+          });
+        }
+      }, [selectedPeriod, priceHistory, chartLoading, darkMode]);
+
+      async function fetchBalances() {
+        setErr(null);
+        const input = accountsInput.trim();
+        if (!input) {
+          setErr("Please enter at least one valid Banano account.");
+          return;
+        }
+        const accounts = input.split(',').map(acc => acc.trim()).filter(acc => acc.startsWith('ban_')).slice(0, 10);
+        if (accounts.length === 0) {
+          setErr("No valid Banano accounts found. Accounts must start with 'ban_'.");
+          return;
+        }
+        if (input.split(',').length > 10) {
+          setErr("Limited to 10 accounts for performance. Excess ignored.");
+        }
+        setLoading(true);
+        setAccountsData(accounts.map(acc => ({ account: acc, balance: "0", pending: "0", history: [], error: null })));
+
+        try {
+          const promises = accounts.map(async (acc) => {
+            try {
+              const body = { action: "account_balance", account: acc };
+              const res = await fetch(rpcUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              });
+              if (!res.ok) throw new Error(`RPC error: ${res.status}`);
+              const j = await res.json();
+              if (typeof j.balance === "undefined") throw new Error("Invalid RPC response for balance");
+
+              const balance = rawToBan(j.balance);
+              const pending = rawToBan(j.pending || "0");
+
+              const hbody = { action: "account_history", account: acc, count: 10 };
+              const hres = await fetch(rpcUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(hbody),
+              });
+              if (!hres.ok) throw new Error(`RPC error: ${hres.status}`);
+              const hj = await hres.json();
+              const history = Array.isArray(hj.history) ? hj.history : [];
+
+              return { account: acc, balance, pending, history, error: null };
+            } catch (e) {
+              return { account: acc, balance: "0", pending: "0", history: [], error: e.message || "Failed to fetch data" };
+            }
+          });
+
+          const results = await Promise.all(promises);
+          setAccountsData(results);
+        } catch (e) {
+          console.error("Failed to fetch balances:", e);
+          setErr("An error occurred while fetching data. Please check your connection and try again.");
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      function toggleDarkMode() {
+        setDarkMode(prev => {
+          const newMode = !prev;
+          if (newMode) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+          return newMode;
+        });
+      }
+
+      function copyDonationAddress() {
+        navigator.clipboard.writeText(donationAddress).then(() => {
+          alert('Address copied to clipboard!');
+        }).catch(err => {
+          console.error('Failed to copy: ', err);
+          alert('Failed to copy address. Please copy manually.');
+        });
+      }
+
+      function toggleHistory(account) {
+        setExpandedHistories(prev => ({ ...prev, [account]: !prev[account] }));
+      }
+
       return (
-        <div className="max-w-4xl mx-auto bg-white/80 dark:bg-gray-800/80 rounded-2xl shadow-lg p-6 mt-10">
+        <div className={`max-w-4xl mx-auto bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-2xl shadow-lg p-6 mt-10 text-gray-900 dark:text-gray-100`}>
           <div className="flex justify-between items-center">
             <h1 className="text-3xl font-extrabold">Banano Dashboard</h1>
             <button onClick={toggleDarkMode} className="bg-gray-200 dark:bg-gray-700 px-3 py-1 rounded text-black dark:text-white">
-              {darkMode ? "Light Mode" : "Dark Mode"}
+              {darkMode ? 'Light Mode' : 'Dark Mode'}
             </button>
           </div>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Enter Banano accounts (comma-separated) to view balances, prices, and histories</p>
 
-          <div className="mt-6 flex gap-2">
-            <input value={newAccount} onChange={e => setNewAccount(e.target.value)} placeholder="ban_..."
-              className="flex-1 rounded-md border p-2 dark:bg-gray-700 dark:text-white" />
-            <button onClick={addAccount} className="bg-yellow-400 hover:bg-yellow-500 px-4 rounded">Add</button>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">Accounts</label>
+              <input value={accountsInput} onChange={(e) => setAccountsInput(e.target.value)} placeholder="ban_..., ban_..."
+                className="mt-1 block w-full rounded-md border border-gray-300 dark:border-gray-600 p-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+            </div>
+            <div className="flex items-end">
+              <button onClick={fetchBalances}
+                className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-bold py-2 px-4 rounded-lg disabled:opacity-50"
+                disabled={loading}>
+                {loading ? "Loading..." : "Fetch Data"}
+              </button>
+            </div>
           </div>
 
-          {accounts.length === 0 ? (
-            <p className="mt-4 text-gray-500 dark:text-gray-400">No accounts added yet.</p>
-          ) : (
-            <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-              {accounts.map(acc => (
-                <div key={acc} className="p-4 bg-white dark:bg-gray-700 rounded-lg shadow">
-                  <p className="text-xs text-gray-500 break-all">{acc}</p>
-                  <p className="mt-2">Balance: <span className="font-bold">{balances[acc] || "?"} BAN</span></p>
-                  <p>Pending: <span className="font-mono">{pending[acc] || "?"} BAN</span></p>
-                  <button onClick={() => fetchBalance(acc)} className="mt-2 bg-yellow-400 hover:bg-yellow-500 px-2 py-1 rounded">Refresh</button>
-                  {priceUsd && balances[acc] && (
-                    <p className="mt-2">≈ ${(parseFloat(balances[acc]) * priceUsd).toFixed(6)} USD</p>
+          {err && <div className="mt-4 text-red-600 dark:text-red-400">Error: {err}</div>}
+
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Banano price (USD)</div>
+              <div className="text-2xl mt-2">{priceUsd ? `$${priceUsd.toFixed(6)}` : "-"}</div>
+            </div>
+          </div>
+
+          {accountsData.length > 0 && (
+            <div className="mt-6">
+              <h2 className="text-xl font-bold mb-2">💰 Wallet Balances</h2>
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg">
+                  <thead>
+                    <tr className="bg-gray-100 dark:bg-gray-600">
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300">Account</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300">Balance (BAN)</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300">Pending (BAN)</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300">Est. Value (USD)</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {accountsData.map((data, i) => (
+                      <tr key={i} className="border-t border-gray-200 dark:border-gray-600">
+                        <td className="px-4 py-2 text-sm font-mono break-all">{data.account}</td>
+                        <td className="px-4 py-2 text-sm">{data.balance}</td>
+                        <td className="px-4 py-2 text-sm">{data.pending}</td>
+                        <td className="px-4 py-2 text-sm">
+                          {priceUsd && data.balance !== "0" ? `$${(parseFloat(data.balance) * priceUsd).toFixed(6)}` : "-"}
+                        </td>
+                        <td className="px-4 py-2 text-sm">
+                          {data.error ? <span className="text-red-600 dark:text-red-400">{data.error}</span> : "OK"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-8">
+            <h2 className="text-xl font-bold mb-2">📈 Price Chart</h2>
+            <div className="flex space-x-2 mb-4">
+              {periods.map(days => (
+                <button key={days} onClick={() => setSelectedPeriod(days)}
+                  className={`px-3 py-1 rounded ${selectedPeriod === days ? 'bg-yellow-400 text-black' : 'bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-gray-200'}`}>
+                  {days} days
+                </button>
+              ))}
+            </div>
+            {chartLoading ? (
+              <div className="text-center text-gray-500 dark:text-gray-400">Loading chart...</div>
+            ) : (
+              <canvas ref={chartCanvasRef} className="w-full h-64"></canvas>
+            )}
+          </div>
+
+          {accountsData.length > 0 && (
+            <div className="mt-8">
+              <h2 className="text-xl font-bold mb-2">📜 Transaction Histories</h2>
+              {accountsData.map((data, i) => (
+                <div key={i} className="mb-4">
+                  <button onClick={() => toggleHistory(data.account)}
+                    className="w-full text-left p-3 bg-gray-100 dark:bg-gray-600 rounded-lg font-medium flex justify-between items-center">
+                    {data.account}
+                    <span>{expandedHistories[data.account] ? '▲' : '▼'}</span>
+                  </button>
+                  {expandedHistories[data.account] && (
+                    <ul className="mt-2 space-y-2">
+                      {data.history.length === 0 ? (
+                        <div className="text-gray-500 dark:text-gray-400">No transactions</div>
+                      ) : (
+                        data.history.map((tx, j) => (
+                          <li key={j} className="p-3 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 flex flex-col">
+                            <span className="text-sm text-gray-600 dark:text-gray-300">{tx.type.toUpperCase()}</span>
+                            <span className="font-mono text-yellow-600 dark:text-yellow-400">{rawToBan(tx.amount)} BAN</span>
+                            <span className="text-xs text-gray-500 dark:text-gray-400 break-all">Hash: {tx.hash}</span>
+                          </li>
+                        ))
+                      )}
+                    </ul>
                   )}
                 </div>
               ))}
             </div>
           )}
 
-          <div className="mt-8 p-4 bg-yellow-100 dark:bg-gray-600 rounded-lg">
-            <h2 className="text-lg font-bold text-yellow-700 dark:text-yellow-300 mb-2">💛 Support</h2>
-            <p className="text-sm">Donate BAN to:
+          <div className="mt-8 p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+            <p className="text-sm text-gray-600 dark:text-gray-300">
+              If you like this dashboard, please consider donating to: 
               <span className="font-mono ml-1 break-all">{donationAddress}</span>
+              <button onClick={copyDonationAddress} className="ml-2 bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded text-xs">
+                Copy
+              </button>
             </p>
-            <button onClick={copyDonationAddress} className="mt-2 bg-yellow-400 hover:bg-yellow-500 text-black font-semibold px-3 py-1 rounded">
-              Copy
-            </button>
           </div>
         </div>
       );
