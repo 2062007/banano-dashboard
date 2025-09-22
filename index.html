@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Banano Dashboard 🍌</title>
+  <title>Banano Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -19,11 +19,11 @@
   <!-- Chart.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body class="bg-gradient-to-b from-yellow-50 to-white min-h-screen">
+<body class="bg-gradient-to-b from-yellow-50 to-white dark:from-gray-900 dark:to-gray-800 min-h-screen">
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     function BananoDashboard() {
       const [account, setAccount] = useState("");
@@ -35,10 +35,13 @@
       const [selectedPeriod, setSelectedPeriod] = useState(1);
       const periods = [1, 7, 30, 90, 365];
       const [loading, setLoading] = useState(false);
+      const [chartLoading, setChartLoading] = useState(false);
       const [err, setErr] = useState(null);
       const [history, setHistory] = useState([]);
       const [darkMode, setDarkMode] = useState(false);
       const donationAddress = "ban_184q6ah1cnumorsxedazfukmd1xcx4he5fnmjri5cm7mhen4oixo9gtqwhk1";
+      const chartRef = useRef(null);
+      const chartCanvasRef = useRef(null);
 
       function rawToBan(rawStr) {
         try {
@@ -58,158 +61,210 @@
       async function fetchPrice() {
         try {
           const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=banano&vs_currencies=usd");
+          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
           const j = await res.json();
           if (j && j.banano && typeof j.banano.usd !== "undefined") {
             setPriceUsd(j.banano.usd);
+          } else {
+            throw new Error("Invalid price data");
           }
         } catch (e) {
-          console.error(e);
+          console.error("Failed to fetch price:", e);
+          setErr("Failed to fetch current price. Please try again later.");
         }
       }
 
       async function fetchPriceHistory(days) {
+        setChartLoading(true);
         try {
           const res = await fetch(`https://api.coingecko.com/api/v3/coins/banano/market_chart?vs_currency=usd&days=${days}`);
+          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
           const j = await res.json();
           if (j && j.prices) {
             setPriceHistory(prev => ({ ...prev, [days]: j.prices }));
+          } else {
+            throw new Error("Invalid price history data");
           }
         } catch (e) {
-          console.error(e);
+          console.error(`Failed to fetch price history for ${days} days:`, e);
+          setErr(`Failed to load price chart for ${days} days. Please try again.`);
+        } finally {
+          setChartLoading(false);
         }
       }
 
       useEffect(() => {
         fetchPrice();
-        const t = setInterval(fetchPrice, 60_000);
-        periods.forEach(days => fetchPriceHistory(days));
+        const t = setInterval(fetchPrice, 60000);
         return () => clearInterval(t);
       }, []);
 
       useEffect(() => {
-        const chartCtx = document.getElementById('priceChart');
-        if (chartCtx && priceHistory[selectedPeriod]) {
+        if (!priceHistory[selectedPeriod]) {
+          fetchPriceHistory(selectedPeriod);
+        }
+      }, [selectedPeriod]);
+
+      useEffect(() => {
+        if (chartCanvasRef.current && priceHistory[selectedPeriod] && !chartLoading) {
+          const ctx = chartCanvasRef.current.getContext('2d');
+          if (chartRef.current) {
+            chartRef.current.destroy();
+          }
           const labels = priceHistory[selectedPeriod].map(([time]) => new Date(time).toLocaleDateString());
           const data = priceHistory[selectedPeriod].map(([, price]) => price);
-          new Chart(chartCtx, {
+          const borderColor = darkMode ? 'rgb(255, 255, 255)' : 'rgb(255, 193, 7)';
+          const backgroundColor = darkMode ? 'rgb(255, 255, 255)' : 'rgb(255, 193, 7)';
+          const textColor = darkMode ? 'white' : 'black';
+          chartRef.current = new Chart(ctx, {
             type: 'line',
             data: {
               labels,
               datasets: [{
                 label: `Banano Price (USD) over ${selectedPeriod} days`,
                 data,
-                borderColor: 'rgb(255, 193, 7)',
+                borderColor,
+                backgroundColor,
                 tension: 0.1
               }]
             },
             options: {
               scales: {
                 y: {
-                  beginAtZero: false
+                  beginAtZero: false,
+                  ticks: {
+                    color: textColor
+                  },
+                  grid: {
+                    color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
+                  }
+                },
+                x: {
+                  ticks: {
+                    color: textColor
+                  },
+                  grid: {
+                    color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
+                  }
+                }
+              },
+              plugins: {
+                legend: {
+                  labels: {
+                    color: textColor
+                  }
                 }
               }
             }
           });
         }
-      }, [selectedPeriod, priceHistory]);
+      }, [selectedPeriod, priceHistory, chartLoading, darkMode]);
 
       async function fetchBalance() {
         setErr(null);
-        if (!account) {
-          setErr("Please enter an account");
+        const trimmedAccount = account.trim();
+        if (!trimmedAccount || !trimmedAccount.startsWith('ban_')) {
+          setErr("Please enter a valid Banano account starting with 'ban_'");
           return;
         }
         setLoading(true);
         try {
-          // Balance
-          const body = { action: "account_balance", account: account };
+          const body = { action: "account_balance", account: trimmedAccount };
           const res = await fetch(rpcUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
-          if (!res.ok) throw new Error(`RPC error ${res.status}`);
+          if (!res.ok) throw new Error(`RPC error: ${res.status}`);
           const j = await res.json();
-          if (typeof j.balance === "undefined") throw new Error("Invalid RPC response");
+          if (typeof j.balance === "undefined") throw new Error("Invalid RPC response for balance");
+
           setBalanceBan(rawToBan(j.balance));
           setPendingBan(rawToBan(j.pending || "0"));
 
-          // History
+          const hbody = { action: "account_history", account: trimmedAccount, count: 10 };
           const hres = await fetch(rpcUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "account_history", account: account, count: 10 }),
+            body: JSON.stringify(hbody),
           });
+          if (!hres.ok) throw new Error(`RPC error: ${hres.status}`);
           const hj = await hres.json();
           if (hj && Array.isArray(hj.history)) {
             setHistory(hj.history);
           } else {
             setHistory([]);
+            console.warn("Invalid history response");
           }
         } catch (e) {
-          setErr(e.message);
+          console.error("Failed to fetch balance:", e);
+          setErr(e.message || "An error occurred while fetching data. Please check your connection and try again.");
         } finally {
           setLoading(false);
         }
       }
 
       function toggleDarkMode() {
-        setDarkMode(!darkMode);
+        setDarkMode(prev => !prev);
         document.documentElement.classList.toggle('dark');
       }
 
       function copyDonationAddress() {
-        navigator.clipboard.writeText(donationAddress);
-        alert('Address copied to clipboard!');
+        navigator.clipboard.writeText(donationAddress).then(() => {
+          alert('Address copied to clipboard!');
+        }).catch(err => {
+          console.error('Failed to copy: ', err);
+          alert('Failed to copy address. Please copy manually.');
+        });
       }
 
       return (
-        <div className={`max-w-4xl mx-auto bg-white/80 backdrop-blur rounded-2xl shadow-lg p-6 mt-10 ${darkMode ? 'dark:bg-gray-800 dark:text-white' : ''}`}>
+        <div className={`max-w-4xl mx-auto bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-2xl shadow-lg p-6 mt-10 text-gray-900 dark:text-gray-100`}>
           <div className="flex justify-between items-center">
-            <h1 className="text-3xl font-extrabold">Banano Dashboard 🍌</h1>
-            <button onClick={toggleDarkMode} className="bg-gray-200 dark:bg-gray-700 px-3 py-1 rounded">
+            <h1 className="text-3xl font-extrabold">Banano Dashboard</h1>
+            <button onClick={toggleDarkMode} className="bg-gray-200 dark:bg-gray-700 px-3 py-1 rounded text-black dark:text-white">
               {darkMode ? 'Light Mode' : 'Dark Mode'}
             </button>
           </div>
-          <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">Enter your Banano account to view balance, price, and transaction history</p>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Enter your Banano account to view balance, price, and transaction history</p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">Account</label>
               <input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="ban_..."
-                className="mt-1 block w-full rounded-md border p-2 dark:bg-gray-700 dark:text-white" />
+                className="mt-1 block w-full rounded-md border border-gray-300 dark:border-gray-600 p-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
             </div>
             <div className="flex items-end">
               <button onClick={fetchBalance}
-                className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-bold py-2 px-4 rounded-lg"
+                className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-bold py-2 px-4 rounded-lg disabled:opacity-50"
                 disabled={loading}>
                 {loading ? "Loading..." : "Fetch Data"}
               </button>
             </div>
           </div>
 
-          {err && <div className="mt-4 text-red-600">Error: {err}</div>}
+          {err && <div className="mt-4 text-red-600 dark:text-red-400">Error: {err}</div>}
 
           <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+            <div className="p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
               <div className="text-xs text-gray-500 dark:text-gray-400">Balance (BAN)</div>
               <div className="text-2xl font-bold mt-2">{balanceBan}</div>
             </div>
-            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+            <div className="p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
               <div className="text-xs text-gray-500 dark:text-gray-400">Pending (BAN)</div>
               <div className="text-xl font-mono mt-2">{pendingBan}</div>
             </div>
-            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+            <div className="p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
               <div className="text-xs text-gray-500 dark:text-gray-400">Banano price (USD)</div>
-              <div className="text-2xl mt-2">{priceUsd ? `$${priceUsd}` : "-"}</div>
+              <div className="text-2xl mt-2">{priceUsd ? `$${priceUsd.toFixed(6)}` : "-"}</div>
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-1 md:grid-cols-1 gap-4">
-            <div className="p-4 bg-white rounded-lg border dark:bg-gray-700">
+          <div className="mt-6 grid grid-cols-1 gap-4">
+            <div className="p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
               <div className="text-xs text-gray-500 dark:text-gray-400">Estimated Value (USD)</div>
               <div className="text-2xl mt-2">
-                {priceUsd && balanceBan !== "0" ? (`$${(parseFloat(balanceBan) * priceUsd).toFixed(6)}`) : "-"}
+                {priceUsd && balanceBan !== "0" ? `$${(parseFloat(balanceBan) * priceUsd).toFixed(6)}` : "-"}
               </div>
             </div>
           </div>
@@ -219,33 +274,40 @@
             <div className="flex space-x-2 mb-4">
               {periods.map(days => (
                 <button key={days} onClick={() => setSelectedPeriod(days)}
-                  className={`px-3 py-1 rounded ${selectedPeriod === days ? 'bg-yellow-400 text-black' : 'bg-gray-200 dark:bg-gray-600'}`}>
+                  className={`px-3 py-1 rounded ${selectedPeriod === days ? 'bg-yellow-400 text-black' : 'bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-gray-200'}`}>
                   {days} days
                 </button>
               ))}
             </div>
-            <canvas id="priceChart" className="w-full h-64"></canvas>
+            {chartLoading ? (
+              <div className="text-center text-gray-500 dark:text-gray-400">Loading chart...</div>
+            ) : (
+              <canvas ref={chartCanvasRef} className="w-full h-64"></canvas>
+            )}
           </div>
 
           <div className="mt-8">
             <h2 className="text-xl font-bold mb-2">📜 Transaction History</h2>
-            {history.length === 0 && <div className="text-gray-500 dark:text-gray-400">No transactions</div>}
-            <ul className="space-y-2">
-              {history.map((tx, i) => (
-                <li key={i} className="p-3 bg-white rounded-lg border dark:bg-gray-700 flex flex-col">
-                  <span className="text-sm text-gray-600 dark:text-gray-300">{tx.type.toUpperCase()}</span>
-                  <span className="font-mono text-yellow-600">{rawToBan(tx.amount)} BAN</span>
-                  <span className="text-xs text-gray-500 dark:text-gray-400 break-all">Hash: {tx.hash}</span>
-                </li>
-              ))}
-            </ul>
+            {history.length === 0 ? (
+              <div className="text-gray-500 dark:text-gray-400">No transactions</div>
+            ) : (
+              <ul className="space-y-2">
+                {history.map((tx, i) => (
+                  <li key={i} className="p-3 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 flex flex-col">
+                    <span className="text-sm text-gray-600 dark:text-gray-300">{tx.type.toUpperCase()}</span>
+                    <span className="font-mono text-yellow-600 dark:text-yellow-400">{rawToBan(tx.amount)} BAN</span>
+                    <span className="text-xs text-gray-500 dark:text-gray-400 break-all">Hash: {tx.hash}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
-          <div className="mt-8 p-4 bg-white rounded-lg border dark:bg-gray-700">
+          <div className="mt-8 p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
             <p className="text-sm text-gray-600 dark:text-gray-300">
               If you like this dashboard, please consider donating to: 
-              <span className="font-mono ml-1">{donationAddress}</span>
-              <button onClick={copyDonationAddress} className="ml-2 bg-blue-500 text-white px-2 py-1 rounded text-xs">
+              <span className="font-mono ml-1 break-all">{donationAddress}</span>
+              <button onClick={copyDonationAddress} className="ml-2 bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded text-xs">
                 Copy
               </button>
             </p>
