@@ -1,4 +1,43 @@
-<!DOCTYPE html>
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -25,51 +64,69 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect, useRef, useMemo } = React;
+    const { useState, useEffect, useRef, useMemo, useReducer } = React;
+
+    // Reducer để quản lý trạng thái tài khoản
+    const initialState = {
+      accountsData: [],
+      totals: { balance: 0, pending: 0, value: "-" },
+      loading: false,
+      error: null
+    };
+
+    function accountsReducer(state, action) {
+      switch (action.type) {
+        case 'SET_LOADING':
+          return { ...state, loading: true, error: null };
+        case 'SET_DATA':
+          return {
+            ...state,
+            accountsData: action.payload.accountsData,
+            totals: action.payload.totals,
+            loading: false,
+            error: null
+          };
+        case 'SET_ERROR':
+          return { ...state, error: action.payload, loading: false, accountsData: [] };
+        default:
+          return state;
+      }
+    }
 
     function BananoDashboard() {
       const [accountsInput, setAccountsInput] = useState("");
-      const rpcUrl = "https://api.banano.trade/proxy"; // Hardcoded and hidden
-      const [accountsData, setAccountsData] = useState([]);
-      const [totals, setTotals] = useState({ balance: 0, pending: 0, value: "-" });
+      const [state, dispatch] = useReducer(accountsReducer, initialState);
       const [priceUsd, setPriceUsd] = useState(null);
       const [priceHistory, setPriceHistory] = useState({});
       const [selectedPeriod, setSelectedPeriod] = useState(1);
       const periods = [1, 7, 30, 90, 365];
-      const [loading, setLoading] = useState(false);
       const [chartLoading, setChartLoading] = useState(false);
-      const [err, setErr] = useState(null);
       const [darkMode, setDarkMode] = useState(false);
       const [expandedHistories, setExpandedHistories] = useState({});
-      const [autoRefresh, setAutoRefresh] = useState(true); // New: Auto-refresh toggle
+      const [autoRefresh, setAutoRefresh] = useState(true);
       const donationAddress = "ban_184q6ah1cnumorsxedazfukmd1xcx4he5fnmjri5cm7mhen4oixo9gtqwhk1";
       const chartRef = useRef(null);
       const chartCanvasRef = useRef(null);
       const abortControllerRef = useRef(null);
+      const rpcUrl = "https://api.banano.trade/proxy";
 
       // Load settings from localStorage on mount
       useEffect(() => {
         const savedAccounts = localStorage.getItem('bananoAccounts');
-        if (savedAccounts) {
-          setAccountsInput(savedAccounts);
-        }
+        if (savedAccounts) setAccountsInput(savedAccounts);
         const savedDarkMode = localStorage.getItem('bananoDarkMode') === 'true';
         setDarkMode(savedDarkMode);
-        if (savedDarkMode) {
-          document.documentElement.classList.add('dark');
-        }
+        if (savedDarkMode) document.documentElement.classList.add('dark');
         const savedAutoRefresh = localStorage.getItem('bananoAutoRefresh');
-        if (savedAutoRefresh !== null) {
-          setAutoRefresh(savedAutoRefresh === 'true');
-        }
+        if (savedAutoRefresh !== null) setAutoRefresh(savedAutoRefresh === 'true');
       }, []);
 
-      // Save accountsInput to localStorage when it changes
+      // Save accountsInput to localStorage
       useEffect(() => {
         localStorage.setItem('bananoAccounts', accountsInput);
       }, [accountsInput]);
 
-      // Save darkMode to localStorage when it changes
+      // Save darkMode to localStorage
       useEffect(() => {
         localStorage.setItem('bananoDarkMode', darkMode);
       }, [darkMode]);
@@ -79,41 +136,45 @@
         localStorage.setItem('bananoAutoRefresh', autoRefresh);
       }, [autoRefresh]);
 
-      function rawToBan(rawStr) {
+      // Hàm chuyển đổi raw sang BAN
+      const rawToBan = useMemo(() => (rawStr) => {
         try {
-          if (typeof rawStr !== 'string') rawStr = String(rawStr || "0");
-          const raw = BigInt(rawStr);
+          const raw = BigInt(String(rawStr || "0"));
           const base = BigInt("100000000000000000000000000000"); // 1e29
           const whole = raw / base;
           const rem = raw % base;
           const remStr = rem.toString().padStart(29, "0");
-          let frac = remStr.replace(/0+$/g, "");
-          if (frac === "") return whole.toString();
-          return `${whole.toString()}.${frac}`;
+          const frac = remStr.replace(/0+$/, "");
+          return frac === "" ? whole.toString() : `${whole}.${frac}`;
         } catch {
           return "0";
         }
-      }
+      }, []);
 
-      async function fetchWithTimeout(url, options = {}, timeout = 10000) {
-        const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(), timeout);
-        try {
-          const response = await fetch(url, { ...options, signal: controller.signal });
-          clearTimeout(id);
-          return response;
-        } catch (e) {
-          clearTimeout(id);
-          throw e;
+      // Hàm fetch với retry
+      async function fetchWithRetry(url, options = {}, retries = 3, timeout = 10000) {
+        for (let i = 0; i < retries; i++) {
+          const controller = new AbortController();
+          const id = setTimeout(() => controller.abort(), timeout);
+          try {
+            const response = await fetch(url, { ...options, signal: controller.signal });
+            clearTimeout(id);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            return response;
+          } catch (e) {
+            clearTimeout(id);
+            if (e.name === 'AbortError' || i === retries - 1) throw e;
+            await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // Exponential backoff
+          }
         }
       }
 
+      // Fetch giá Banano
       async function fetchPrice() {
         try {
-          const res = await fetchWithTimeout("https://api.coingecko.com/api/v3/simple/price?ids=banano&vs_currencies=usd");
-          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+          const res = await fetchWithRetry("https://api.coingecko.com/api/v3/simple/price?ids=banano&vs_currencies=usd");
           const j = await res.json();
-          if (j && j.banano && typeof j.banano.usd !== "undefined") {
+          if (j?.banano?.usd != null) {
             setPriceUsd(j.banano.usd);
           } else {
             throw new Error("Invalid price data");
@@ -121,18 +182,18 @@
         } catch (e) {
           if (e.name !== 'AbortError') {
             console.error("Failed to fetch price:", e);
-            setErr("Failed to fetch current price. Please try again later.");
+            dispatch({ type: 'SET_ERROR', payload: "Failed to fetch current price. Please try again later." });
           }
         }
       }
 
+      // Fetch lịch sử giá
       async function fetchPriceHistory(days) {
         setChartLoading(true);
         try {
-          const res = await fetchWithTimeout(`https://api.coingecko.com/api/v3/coins/banano/market_chart?vs_currency=usd&days=${days}`);
-          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+          const res = await fetchWithRetry(`https://api.coingecko.com/api/v3/coins/banano/market_chart?vs_currency=usd&days=${days}`);
           const j = await res.json();
-          if (j && j.prices) {
+          if (j?.prices?.length) {
             setPriceHistory(prev => ({ ...prev, [days]: j.prices }));
           } else {
             throw new Error("Invalid price history data");
@@ -140,13 +201,14 @@
         } catch (e) {
           if (e.name !== 'AbortError') {
             console.error(`Failed to fetch price history for ${days} days:`, e);
-            setErr(`Failed to load price chart for ${days} days. Please try again.`);
+            dispatch({ type: 'SET_ERROR', payload: `Failed to load price chart for ${days} days. Please try again.` });
           }
         } finally {
           setChartLoading(false);
         }
       }
 
+      // Fetch giá và lịch sử giá khi mount
       useEffect(() => {
         fetchPrice();
         const t = setInterval(fetchPrice, 60000);
@@ -155,175 +217,167 @@
 
       useEffect(() => {
         periods.forEach(days => {
-          if (!priceHistory[days]) {
-            fetchPriceHistory(days);
-          }
+          if (!priceHistory[days]) fetchPriceHistory(days);
         });
       }, []);
 
-      // Auto-refresh for balances
+      // Auto-refresh cho balances
       useEffect(() => {
         let interval;
-        if (autoRefresh && accountsData.length > 0) {
-          interval = setInterval(() => {
-            fetchBalances();
-          }, 300000); // 5 minutes
+        if (autoRefresh && state.accountsData.length > 0) {
+          interval = setInterval(fetchBalances, 300000); // 5 phút
         }
         return () => clearInterval(interval);
-      }, [autoRefresh, accountsData.length]);
+      }, [autoRefresh, state.accountsData.length]);
 
-      // Auto-refresh for price history (every 10 minutes)
+      // Auto-refresh cho lịch sử giá
       useEffect(() => {
         const interval = setInterval(() => {
           periods.forEach(days => fetchPriceHistory(days));
-        }, 600000); // 10 minutes
+        }, 600000); // 10 phút
         return () => clearInterval(interval);
       }, []);
 
-      // Update totals when priceUsd changes
+      // Cập nhật biểu đồ giá
       useEffect(() => {
-        if (accountsData.length > 0 && priceUsd) {
-          const totalBalance = accountsData.reduce((sum, data) => sum + parseFloat(data.balance || 0), 0).toFixed(2);
-          const totalPending = accountsData.reduce((sum, data) => sum + parseFloat(data.pending || 0), 0).toFixed(2);
-          const totalValue = (parseFloat(totalBalance) * priceUsd).toFixed(6);
-          setTotals({ balance: totalBalance, pending: totalPending, value: totalValue });
-        }
-      }, [priceUsd, accountsData]);
+        if (!chartCanvasRef.current || !priceHistory[selectedPeriod] || chartLoading) return;
 
-      function debounce(func, delay) {
-        let timeout;
-        return (...args) => {
-          clearTimeout(timeout);
-          timeout = setTimeout(() => func(...args), delay);
-        };
-      }
+        const ctx = chartCanvasRef.current.getContext('2d');
+        const prices = priceHistory[selectedPeriod];
+        const labels = prices.map(([time]) => new Date(time));
+        const data = prices.map(([, price]) => price);
+        const minY = Math.min(...data) * 0.95;
+        const maxY = Math.max(...data) * 1.05;
+        const borderColor = darkMode ? 'rgb(255, 255, 255)' : 'rgb(255, 193, 7)';
+        const textColor = darkMode ? 'white' : 'black';
 
-      const debouncedSetPeriod = debounce(setSelectedPeriod, 300);
+        const gradient = ctx.createLinearGradient(0, 0, 0, chartCanvasRef.current.height);
+        gradient.addColorStop(0, darkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(255, 193, 7, 0.2)');
+        gradient.addColorStop(1, darkMode ? 'rgba(255, 255, 255, 0)' : 'rgba(255, 193, 7, 0)');
 
-      useEffect(() => {
-        if (chartCanvasRef.current && priceHistory[selectedPeriod] && !chartLoading) {
-          const ctx = chartCanvasRef.current.getContext('2d');
-          const prices = priceHistory[selectedPeriod];
-          const labels = prices.map(([time]) => new Date(time));
-          const data = prices.map(([, price]) => price);
-          const minY = Math.min(...data) * 0.95;
-          const maxY = Math.max(...data) * 1.05;
-          const borderColor = darkMode ? 'rgb(255, 255, 255)' : 'rgb(255, 193, 7)';
-          const textColor = darkMode ? 'white' : 'black';
-
-          // Create gradient for fill
-          const gradient = ctx.createLinearGradient(0, 0, 0, chartCanvasRef.current.height);
-          gradient.addColorStop(0, darkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(255, 193, 7, 0.2)');
-          gradient.addColorStop(1, darkMode ? 'rgba(255, 255, 255, 0)' : 'rgba(255, 193, 7, 0)');
-
-          const chartConfig = {
-            type: 'line',
-            data: {
-              labels,
-              datasets: [{
-                label: `Banano Price (USD) over ${selectedPeriod} days`,
-                data,
-                borderColor,
-                backgroundColor: gradient,
-                fill: true,
-                tension: 0.4, // Smoother curve
-                pointRadius: 0, // Hide points for cleaner look
-              }]
-            },
-            options: {
-              responsive: true,
-              animation: {
-                duration: 1000,
-                easing: 'easeInOutQuad'
-              },
-              scales: {
-                x: {
-                  type: 'time',
-                  time: {
-                    unit: selectedPeriod > 30 ? 'month' : selectedPeriod > 7 ? 'week' : 'day',
-                    displayFormats: {
-                      day: 'MMM d',
-                      week: 'MMM d',
-                      month: 'MMM YYYY'
-                    }
-                  },
-                  ticks: { color: textColor },
-                  grid: { color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }
+        const chartConfig = {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [{
+              label: `Banano Price (USD) over ${selectedPeriod} days`,
+              data,
+              borderColor,
+              backgroundColor: gradient,
+              fill: true,
+              tension: 0.4,
+              pointRadius: 0,
+            }]
+          },
+          options: {
+            responsive: true,
+            animation: { duration: 1000, easing: 'easeInOutQuad' },
+            scales: {
+              x: {
+                type: 'time',
+                time: {
+                  unit: selectedPeriod > 30 ? 'month' : selectedPeriod > 7 ? 'week' : 'day',
+                  displayFormats: { day: 'MMM d', week: 'MMM d', month: 'MMM YYYY' }
                 },
-                y: {
-                  beginAtZero: false,
-                  min: minY,
-                  max: maxY,
-                  ticks: {
-                    color: textColor,
-                    callback: (value) => '$' + value.toFixed(6)
-                  },
-                  grid: { color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }
-                }
+                ticks: { color: textColor },
+                grid: { color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }
               },
-              plugins: {
-                legend: { labels: { color: textColor } },
-                tooltip: {
-                  callbacks: {
-                    label: (context) => '$' + context.parsed.y.toFixed(6)
-                  },
-                  backgroundColor: darkMode ? 'rgba(0, 0, 0, 0.8)' : 'rgba(255, 255, 255, 0.8)',
-                  titleColor: textColor,
-                  bodyColor: textColor
-                }
+              y: {
+                beginAtZero: false,
+                min: minY,
+                max: maxY,
+                ticks: { color: textColor, callback: (value) => '$' + value.toFixed(6) },
+                grid: { color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }
+              }
+            },
+            plugins: {
+              legend: { labels: { color: textColor } },
+              tooltip: {
+                callbacks: { label: (context) => '$' + context.parsed.y.toFixed(6) },
+                backgroundColor: darkMode ? 'rgba(0, 0, 0, 0.8)' : 'rgba(255, 255, 255, 0.8)',
+                titleColor: textColor,
+                bodyColor: textColor
               }
             }
-          };
-
-          if (chartRef.current) {
-            chartRef.current.data = chartConfig.data;
-            chartRef.current.options = chartConfig.options;
-            chartRef.current.update();
-          } else {
-            chartRef.current = new Chart(ctx, chartConfig);
           }
+        };
+
+        if (chartRef.current) {
+          chartRef.current.data = chartConfig.data;
+          chartRef.current.options = chartConfig.options;
+          chartRef.current.update();
+        } else {
+          chartRef.current = new Chart(ctx, chartConfig);
         }
       }, [selectedPeriod, priceHistory, chartLoading, darkMode]);
 
+      // Hàm giải quyết BNS
       async function resolveBNS(name) {
         const [domainName, tld] = name.split('.');
-        if (!domainName || !tld) {
-          throw new Error(`Invalid BNS name format: ${name}`);
-        }
+        if (!domainName || !tld) throw new Error(`Invalid BNS name format: ${name}`);
         try {
-          const res = await fetchWithTimeout("https://api.spyglass.pw/banano/v1/account/bns", {
+          const res = await fetchWithRetry("https://api.spyglass.pw/banano/v1/account/bns", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tld, domain_name: domainName }),
+            body: JSON.stringify({ tld, domain_name: domainName })
           });
-          if (!res.ok) throw new Error(`BNS resolution error: ${res.status}`);
           const address = await res.text();
-          if (address.startsWith('ban_') && address.length === 64) {
-            return address;
-          } else {
-            throw new Error(`Invalid address from BNS: ${address}`);
-          }
+          if (address.startsWith('ban_') && address.length === 64) return address;
+          throw new Error(`Invalid address from BNS: ${address}`);
         } catch (e) {
           throw new Error(`Failed to resolve BNS ${name}: ${e.message}`);
         }
       }
 
+      // Hàm fetch dữ liệu ví
+      async function fetchAccountData(account, entry) {
+        try {
+          const body = { action: "account_balance", account };
+          const res = await fetchWithRetry(rpcUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: abortControllerRef.current?.signal
+          });
+          const j = await res.json();
+          if (j.balance == null) throw new Error("Invalid RPC response for balance");
+
+          const balance = rawToBan(j.balance);
+          const pending = rawToBan(j.pending || "0");
+
+          const hbody = { action: "account_history", account, count: 10 };
+          const hres = await fetchWithRetry(rpcUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(hbody),
+            signal: abortControllerRef.current?.signal
+          });
+          const hj = await hres.json();
+          const history = Array.isArray(hj.history) ? hj.history : [];
+
+          return { account: entry, resolvedAccount: account, balance, pending, history, error: null };
+        } catch (e) {
+          if (e.name !== 'AbortError') {
+            return { account: entry, resolvedAccount: account, balance: "0", pending: "0", history: [], error: e.message || "Failed to fetch data" };
+          }
+          throw e;
+        }
+      }
+
+      // Hàm fetch balances chính
       async function fetchBalances() {
-        setErr(null);
+        dispatch({ type: 'SET_LOADING' });
         const input = accountsInput.trim();
         if (!input) {
-          setErr("Please enter at least one valid Banano account or BNS name.");
+          dispatch({ type: 'SET_ERROR', payload: "Please enter at least one valid Banano account or BNS name." });
           return;
         }
         const rawEntries = input.split('\n').map(entry => entry.trim()).filter(Boolean);
         const uniqueEntries = [...new Set(rawEntries)];
         if (uniqueEntries.length > 10) {
-          setErr("Limited to 10 entries for performance. Excess ignored.");
+          dispatch({ type: 'SET_ERROR', payload: "Limited to 10 entries for performance. Excess ignored." });
         }
         const entries = uniqueEntries.slice(0, 10);
-
-        setLoading(true);
-        setAccountsData(entries.map(entry => ({ account: entry, balance: "0", pending: "0", history: [], error: null })));
 
         abortControllerRef.current = new AbortController();
 
@@ -331,7 +385,6 @@
           const resolvedPromises = entries.map(async (entry) => {
             let account = entry;
             if (entry.includes('.')) {
-              // Assume BNS name
               try {
                 account = await resolveBNS(entry);
               } catch (e) {
@@ -340,56 +393,27 @@
             } else if (!entry.startsWith('ban_') || entry.length !== 64) {
               return { account: entry, balance: "0", pending: "0", history: [], error: "Invalid Banano account" };
             }
-
-            try {
-              const body = { action: "account_balance", account };
-              const res = await fetchWithTimeout(rpcUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-                signal: abortControllerRef.current.signal
-              });
-              if (!res.ok) throw new Error(`RPC error: ${res.status}`);
-              const j = await res.json();
-              if (typeof j.balance === "undefined") throw new Error("Invalid RPC response for balance");
-
-              const balance = rawToBan(j.balance);
-              const pending = rawToBan(j.pending || "0");
-
-              const hbody = { action: "account_history", account, count: 10 };
-              const hres = await fetchWithTimeout(rpcUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(hbody),
-                signal: abortControllerRef.current.signal
-              });
-              if (!hres.ok) throw new Error(`RPC error: ${hres.status}`);
-              const hj = await hres.json();
-              const history = Array.isArray(hj.history) ? hj.history : [];
-
-              return { account: entry, resolvedAccount: account, balance, pending, history, error: null };
-            } catch (e) {
-              if (e.name !== 'AbortError') {
-                return { account: entry, balance: "0", pending: "0", history: [], error: e.message || "Failed to fetch data" };
-              }
-              throw e; // Re-throw abort to cancel all
-            }
+            return fetchAccountData(account, entry);
           });
 
           const results = await Promise.all(resolvedPromises);
-          setAccountsData(results);
-
           const totalBalance = results.reduce((sum, data) => sum + parseFloat(data.balance || 0), 0).toFixed(2);
           const totalPending = results.reduce((sum, data) => sum + parseFloat(data.pending || 0), 0).toFixed(2);
           const totalValue = priceUsd ? (parseFloat(totalBalance) * priceUsd).toFixed(6) : "-";
-          setTotals({ balance: totalBalance, pending: totalPending, value: totalValue });
+
+          dispatch({
+            type: 'SET_DATA',
+            payload: {
+              accountsData: results,
+              totals: { balance: totalBalance, pending: totalPending, value: totalValue }
+            }
+          });
         } catch (e) {
           if (e.name !== 'AbortError') {
             console.error("Failed to fetch balances:", e);
-            setErr("An error occurred while fetching data. Please check your connection and try again.");
+            dispatch({ type: 'SET_ERROR', payload: "An error occurred while fetching data. Please check your connection and try again." });
           }
         } finally {
-          setLoading(false);
           abortControllerRef.current = null;
         }
       }
@@ -397,9 +421,7 @@
       // Cancel ongoing fetches on unmount
       useEffect(() => {
         return () => {
-          if (abortControllerRef.current) {
-            abortControllerRef.current.abort();
-          }
+          if (abortControllerRef.current) abortControllerRef.current.abort();
         };
       }, []);
 
@@ -428,8 +450,16 @@
         setExpandedHistories(prev => ({ ...prev, [account]: !prev[account] }));
       }
 
+      const debouncedSetPeriod = useMemo(() => {
+        let timeout;
+        return (period) => {
+          clearTimeout(timeout);
+          timeout = setTimeout(() => setSelectedPeriod(period), 300);
+        };
+      }, []);
+
       return (
-        <div className={`max-w-4xl mx-auto bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-2xl shadow-lg p-6 mt-10 text-gray-900 dark:text-gray-100 transition-all duration-300`}>
+        <div className="max-w-4xl mx-auto bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-2xl shadow-lg p-6 mt-10 text-gray-900 dark:text-gray-100 transition-all duration-300">
           <div className="flex justify-between items-center">
             <h1 className="text-3xl font-extrabold">Banano Dashboard</h1>
             <div className="flex space-x-2">
@@ -452,13 +482,13 @@
             <div className="flex items-end">
               <button onClick={fetchBalances}
                 className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-bold py-2 px-4 rounded-lg disabled:opacity-50"
-                disabled={loading}>
-                {loading ? "Loading..." : "Fetch Data"}
+                disabled={state.loading}>
+                {state.loading ? "Loading..." : "Fetch Data"}
               </button>
             </div>
           </div>
 
-          {err && <div className="mt-4 text-red-600 dark:text-red-400">Error: {err}</div>}
+          {state.error && <div className="mt-4 text-red-600 dark:text-red-400">Error: {state.error}</div>}
 
           <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="p-4 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
@@ -467,7 +497,7 @@
             </div>
           </div>
 
-          {accountsData.length > 0 && (
+          {state.accountsData.length > 0 && (
             <div className="mt-6">
               <h2 className="text-xl font-bold mb-2">💰 Wallet Balances</h2>
               <div className="overflow-x-auto">
@@ -483,7 +513,7 @@
                     </tr>
                   </thead>
                   <tbody>
-                    {accountsData.map((data, i) => (
+                    {state.accountsData.map((data, i) => (
                       <tr key={i} className="border-t border-gray-200 dark:border-gray-600">
                         <td className="px-4 py-2 text-sm font-mono break-all">{data.account}</td>
                         <td className="px-4 py-2 text-sm font-mono break-all">{data.resolvedAccount || data.account}</td>
@@ -501,9 +531,9 @@
                   <tfoot>
                     <tr className="font-bold border-t border-gray-200 dark:border-gray-600">
                       <td className="px-4 py-2" colSpan="2">Total</td>
-                      <td className="px-4 py-2">{totals.balance} BAN</td>
-                      <td className="px-4 py-2">{totals.pending} BAN</td>
-                      <td className="px-4 py-2">${totals.value}</td>
+                      <td className="px-4 py-2">{state.totals.balance} BAN</td>
+                      <td className="px-4 py-2">{state.totals.pending} BAN</td>
+                      <td className="px-4 py-2">${state.totals.value}</td>
                       <td></td>
                     </tr>
                   </tfoot>
@@ -525,14 +555,14 @@
             {chartLoading ? (
               <div className="text-center text-gray-500 dark:text-gray-400">Loading chart...</div>
             ) : (
-              <canvas ref={chartCanvasRef} className="w-full h-80"></canvas> // Increased height for better view
+              <canvas ref={chartCanvasRef} className="w-full h-80"></canvas>
             )}
           </div>
 
-          {accountsData.length > 0 && (
+          {state.accountsData.length > 0 && (
             <div className="mt-8">
               <h2 className="text-xl font-bold mb-2">📜 Transaction Histories</h2>
-              {accountsData.map((data, i) => (
+              {state.accountsData.map((data, i) => (
                 <div key={i} className="mb-4">
                   <button onClick={() => toggleHistory(data.account)}
                     className="w-full text-left p-3 bg-gray-100 dark:bg-gray-600 rounded-lg font-medium flex justify-between items-center">
